@@ -217,10 +217,6 @@ def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
 
 # -------------------- Bluesky --------------------
 
-def safe_post_text(msg_multiline: str, msg_singleline: str) -> str:
-    # prefer multiline; fall back if too long
-    return msg_multiline if len(msg_multiline) <= 300 else msg_singleline[:300]
-
 def post_bsky(text: str, handle: str, app_pw: str, dry_run: bool = True):
     if dry_run:
         print("[dry-run]", text); return
