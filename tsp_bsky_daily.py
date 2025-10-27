@@ -205,6 +205,7 @@ def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
         (single_top + f"\n\n{HASHTAGS}"),
         (multi_no_top + f"\n\n{HASHTAGS}"),
         (single_no_top + f"\n\n{HASHTAGS}"),
+
         multi_top, single_top, multi_no_top, single_no_top
     ]
 
