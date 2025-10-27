@@ -1,0 +1,19 @@
+name: TSP Alerts Manual Test
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install pandas python-dotenv requests atproto
+          python tsp_bsky_daily.py
+        env:
+          BLSKY_HANDLE: ${{ secrets.BLSKY_HANDLE }}
+          BLSKY_APP_PW: ${{ secrets.BLSKY_APP_PW }}
+          ALLOW_WEEKEND: "true"
+          DRY_RUN: "false"
