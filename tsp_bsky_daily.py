@@ -12,6 +12,7 @@ Run:
 from datetime import date, timedelta
 import io
 import os
+import time
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -21,9 +22,9 @@ from atproto import Client
 
 # -------------------- Weekend guard --------------------
 # Skip Sat(5)/Sun(6). Keep this after datetime imports.
-if date.today().weekday() in (5, 6):
-    print("[info] Weekend: skipping post.")
-    raise SystemExit(0)
+#if date.today().weekday() in (5, 6):
+#    print("[info] Weekend: skipping post.")
+#    raise SystemExit(0)
 
 # -------------------- Config helpers --------------------
 
@@ -34,6 +35,7 @@ def get_funds_from_env() -> List[str]:
     if not raw:
         return DEFAULT_FUNDS
     return [x.strip() for x in raw.split(",") if x.strip()]
+
 
 # -------------------- HTTP headers for tsp.gov --------------------
 
@@ -63,6 +65,18 @@ def build_tsp_csv_url(window_days: int = 30, include_L: bool = True, include_inv
 
 # -------------------- Core logic --------------------
 
+def http_get_with_retry(url, session, tries=3, backoff=2.0):
+    last_err = None
+    for i in range(tries):
+        try:
+            r = session.get(url, timeout=30, allow_redirects=True)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_err = e
+            time.sleep(backoff * (i+1))
+    raise last_err
+
 CORE = {"G Fund","F Fund","C Fund","S Fund","I Fund"}
 def top_mover_label(changes: dict) -> str:
     pool = {k:v for k,v in changes.items() if k in CORE} or changes
@@ -84,19 +98,27 @@ def fetch_prices_and_changes_from_csv_dynamic(
     Returns (prices_dict, changes_dict, as_of_date).
     """
     url = build_tsp_csv_url(window_days=window_days, include_L=True, include_inv=True)
+
     with requests.Session() as s:
         s.headers.update(BROWSER_HEADERS)
-        r = s.get(url, timeout=30, allow_redirects=True)
-        r.raise_for_status()
+        r = http_get_with_retry(url, s)
 
         # Tolerate csv as text/csv or octet-stream; reject obvious HTML.
         raw = r.content
         head = raw[:200].lstrip().lower()
         if head.startswith(b"<html") or b"<html" in head:
-            raise RuntimeError("Got HTML instead of CSV (blocked).")
+            # try toggling the download flag (some deployments differ)
+            alt = url.replace("&download=1", "&download=0") if "&download=1" in url else url.replace("&download=0", "&download=1")
+            r = http_get_with_retry(alt, s)
+            raw = r.content
+            head = raw[:200].lstrip().lower()
+            if head.startswith(b"<html") or b"<html" in head:
+                raise RuntimeError("Got HTML instead of CSV (blocked).")
 
         text = raw.decode("utf-8", errors="ignore")
         df = pd.read_csv(io.StringIO(text))
+        if "Date" not in df.columns:
+            raise RuntimeError(f"Unexpected CSV columns: {list(df.columns)[:8]}")
 
     if df.empty:
         return {}, {}, date.today()
@@ -139,44 +161,55 @@ def fetch_prices_and_changes_from_csv_dynamic(
 
     return prices, changes, as_of
 
-def format_post(prices: Dict[str, float], changes: Dict[str, float], as_of: date, prefix: str = "TSP Returns") -> str:
+def format_post(prices, changes, as_of, prefix="TSP Returns", multiline=False):
     if not prices:
         return f"📊 {prefix} — no new prices yet (weekend/holiday or upstream delay)."
 
-    head = ["G Fund", "F Fund", "C Fund", "S Fund", "I Fund"]
-    tail = sorted(k for k in prices.keys() if k not in set(head))
-    order = [k for k in head if k in prices] + tail
+    order = ["G Fund","F Fund","C Fund","S Fund","I Fund"]
+    lines = []
+    for f in order:
+        if f in prices:
+            p, c = prices[f], changes.get(f)
+            if c is None:
+                lines.append(f"{f.split()[0]}: ${p:,.2f}")
+            else:
+                sign = "+" if c >= 0 else ""
+                lines.append(f"{f.split()[0]}: ${p:,.2f} ({sign}{c:.2f}%)")
 
-    parts = []
-    for k in order:
-        p = prices.get(k)
-        c = changes.get(k)
-        if p is None:
-            continue
-        if c is None:
-            parts.append(f"{k.split()[0]}: ${p:,.2f}")
-        else:
-            sign = "+" if c >= 0 else ""
-            parts.append(f"{k.split()[0]}: ${p:,.2f} ({sign}{c:.2f}%)")
-
-    top = top_mover_label(changes)
-    return f"📊 {prefix} {as_of.isoformat()} — " + " | ".join(parts) + top
+    top = top_mover_label(changes).replace(" — ", "")
+    if multiline:
+        body = "\n".join(lines + ([top] if top else []))
+        return f"📊 {prefix} {as_of.isoformat()}\n{body}"
+    else:
+        body = " | ".join(lines)
+        return f"📊 {prefix} {as_of.isoformat()} — {body}{top}"
 
 # -------------------- Bluesky --------------------
 
+def safe_post_text(msg_multiline: str, msg_singleline: str) -> str:
+    # prefer multiline; fall back if too long
+    return msg_multiline if len(msg_multiline) <= 300 else msg_singleline[:300]
+
 def post_bsky(text: str, handle: str, app_pw: str, dry_run: bool = True):
     if dry_run:
-        print("[dry-run]", text)
-        return
-    client = Client()
-    client.login(handle, app_pw)
-    client.send_post(text)
-    print("[info] Posted to Bluesky.")
+        print("[dry-run]", text); return
+    try:
+        client = Client(); client.login(handle, app_pw); client.send_post(text)
+        print("[info] Posted to Bluesky.")
+    except Exception as e:
+        # Make CI fail visibly
+        raise SystemExit(f"Bluesky post failed: {e}")
 
 # -------------------- Main --------------------
 
 if __name__ == "__main__":
-    load_dotenv(override=True)
+    load_dotenv(override=False)
+    ALLOW_WEEKEND = os.getenv("ALLOW_WEEKEND", "false").lower() in {"1","true","yes","on"}
+
+    # Skip Sat/Sun unless explicitly allowed
+    if (date.today().weekday() in (5, 6)) and not ALLOW_WEEKEND:
+        print("[info] Weekend: skipping post.")
+        raise SystemExit(0)
 
     FUNDS = get_funds_from_env()
     WINDOW_DAYS = int(os.getenv("WINDOW_DAYS", "30"))
@@ -192,7 +225,9 @@ if __name__ == "__main__":
 
     try:
         prices, changes, as_of = fetch_prices_and_changes_from_csv_dynamic(FUNDS, window_days=WINDOW_DAYS)
-        msg = format_post(prices, changes, as_of, prefix=PREFIX)
+        msg_multi  = format_post(prices, changes, as_of, multiline=True)
+        msg_single = format_post(prices, changes, as_of, multiline=False)
+        msg = safe_post_text(msg_multi, msg_single)
         post_bsky(msg, BLSKY_HANDLE, BLSKY_APP_PW, dry_run=DRY_RUN)
     except Exception as e:
         print(f"[error] {e}")
