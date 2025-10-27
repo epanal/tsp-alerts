@@ -16,9 +16,10 @@ import time
 from typing import Dict, List, Tuple
 
 import pandas as pd
+import re
 import requests
 from dotenv import load_dotenv
-from atproto import Client
+from atproto import Client, models
 
 # -------------------- Weekend guard --------------------
 # Skip Sat(5)/Sun(6). Keep this after datetime imports.
@@ -217,16 +218,48 @@ def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
     return candidates[-1][:MAX_CHARS-1] + "…"
 
 # -------------------- Bluesky --------------------
+HASHTAG_RE = re.compile(r'(?<!\w)#([A-Za-z0-9_]+)')
+
+def build_hashtag_facets(text: str):
+    """
+    Produce app.bsky.richtext.facet entries for hashtags in `text`.
+    Uses UTF-8 byte offsets as required by Bluesky.
+    """
+    facets = []
+    for m in HASHTAG_RE.finditer(text):
+        tag = m.group(1)
+        # byte offsets (not codepoints!)
+        byte_start = len(text[:m.start()].encode('utf-8'))
+        byte_end   = byte_start + len(m.group(0).encode('utf-8'))
+
+        facets.append(
+            models.AppBskyRichtextFacet.Main(
+                features=[models.AppBskyRichtextFacet.Tag(tag=tag)],
+                index=models.AppBskyRichtextFacet.ByteSlice(
+                    byte_start=byte_start,
+                    byte_end=byte_end,
+                ),
+            )
+        )
+    return facets
 
 def post_bsky(text: str, handle: str, app_pw: str, dry_run: bool = True):
     if dry_run:
         print("[dry-run]", text); return
     try:
-        client = Client(); client.login(handle, app_pw); client.send_post(text)
-        print("[info] Posted to Bluesky.")
+        client = Client()
+        client.login(handle, app_pw)
+
+        facets = build_hashtag_facets(text)
+        if facets:
+            client.send_post(text=text, facets=facets)
+        else:
+            client.send_post(text=text)
+
+        print("[info] Posted to Bluesky with facets:", bool(facets))
     except Exception as e:
-        # Make CI fail visibly
         raise SystemExit(f"Bluesky post failed: {e}")
+
 
 # -------------------- Main --------------------
 
