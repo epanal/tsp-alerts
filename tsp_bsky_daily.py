@@ -183,6 +183,37 @@ def format_post(prices, changes, as_of, prefix="TSP Returns", multiline=False):
     else:
         body = " | ".join(lines)
         return f"📊 {prefix} {as_of.isoformat()} — {body}{top}"
+    
+MAX_CHARS = 300
+HASHTAGS = "#TSP #ThriftSavingsPlan"
+
+def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
+    # Build all variants
+    multi_top    = format_post(prices, changes, as_of, prefix=prefix, multiline=True)
+    single_top   = format_post(prices, changes, as_of, prefix=prefix, multiline=False)
+
+    # Versions without the Top mover (strip the trailing part we added)
+    def strip_top(m: str) -> str:
+        return m.replace("\nTop:", "\n").replace(" — Top:", "").rstrip()
+
+    multi_no_top  = strip_top(multi_top)
+    single_no_top = strip_top(single_top)
+
+    # Try to append hashtags (with a preceding newline for multiline; space for single)
+    candidates = [
+        (multi_top + f"\n{HASHTAGS}"),
+        (single_top + f" {HASHTAGS}"),
+        (multi_no_top + f"\n{HASHTAGS}"),
+        (single_no_top + f" {HASHTAGS}"),
+        multi_top, single_top, multi_no_top, single_no_top
+    ]
+
+    for msg in candidates:
+        if len(msg) <= MAX_CHARS:
+            return msg
+
+    # As a final fallback, hard trim 
+    return candidates[-1][:MAX_CHARS-1] + "…"
 
 # -------------------- Bluesky --------------------
 
@@ -227,7 +258,7 @@ if __name__ == "__main__":
         prices, changes, as_of = fetch_prices_and_changes_from_csv_dynamic(FUNDS, window_days=WINDOW_DAYS)
         msg_multi  = format_post(prices, changes, as_of, multiline=True)
         msg_single = format_post(prices, changes, as_of, multiline=False)
-        msg = safe_post_text(msg_multi, msg_single)
+        msg = assemble_post(prices, changes, as_of, prefix=PREFIX)
         post_bsky(msg, BLSKY_HANDLE, BLSKY_APP_PW, dry_run=DRY_RUN)
     except Exception as e:
         print(f"[error] {e}")
