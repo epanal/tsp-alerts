@@ -3,7 +3,7 @@ TSP Alerts — Daily fund prices + % change posted to Bluesky.
 Data source: Official TSP CSV (tsp.gov) over a rolling window (default 30 days).
 
 Setup:
-  pip install pandas python-dotenv requests atproto
+  pip install pandas python-dotenv requests atproto tweepy
 
 Run:
   python tsp_bsky_daily.py   # DRY_RUN=true by default (set in .env)
@@ -20,6 +20,7 @@ import re
 import requests
 from dotenv import load_dotenv
 from atproto import Client, models
+import tweepy
 
 # -------------------- Weekend guard --------------------
 # Skip Sat(5)/Sun(6). Keep this after datetime imports.
@@ -260,6 +261,68 @@ def post_bsky(text: str, handle: str, app_pw: str, dry_run: bool = True):
     except Exception as e:
         raise SystemExit(f"Bluesky post failed: {e}")
 
+# -------------------- X/Twitter --------------------
+def _init_twitter_client():
+    k  = os.getenv("TWITTER_API_KEY")
+    ks = os.getenv("TWITTER_API_SECRET")
+    t  = os.getenv("TWITTER_ACCESS_TOKEN")
+    ts = os.getenv("TWITTER_ACCESS_SECRET")
+    if not all([k, ks, t, ts]):
+        return None
+    try:
+        return tweepy.Client(
+            consumer_key=k,
+            consumer_secret=ks,
+            access_token=t,
+            access_token_secret=ts,
+            wait_on_rate_limit=True,
+        )
+    except Exception as e:
+        print(f"[twitter] init failed: {e}")
+        return None
+
+def _split_for_twitter(text: str, limit: int = 280):
+    if len(text) <= limit:
+        return [text]
+    words, chunks, cur = text.split(), [], []
+    for w in words:
+        trial = (" ".join(cur + [w])).strip()
+        # reserve ~6 chars for " (1/10)" suffix if needed
+        if len(trial) + 6 <= limit:
+            cur.append(w)
+        else:
+            chunks.append(" ".join(cur))
+            cur = [w]
+    if cur:
+        chunks.append(" ".join(cur))
+    if len(chunks) > 1:
+        total = len(chunks)
+        chunks = [f"{c} ({i}/{total})" for i, c in enumerate(chunks, 1)]
+    return chunks
+
+def post_twitter(text: str, dry_run: bool = True):
+    client = _init_twitter_client()
+    if client is None:
+        print("[twitter] Skipping: missing API credentials")
+        return None
+    if dry_run:
+        print(f"[dry-run][twitter] {text}")
+        return None
+    try:
+        chunks = _split_for_twitter(text, limit=280)
+        root_id = None
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                resp = client.create_tweet(text=chunk)
+                root_id = resp.data.get("id")
+            else:
+                resp = client.create_tweet(text=chunk, in_reply_to_tweet_id=root_id)
+            time.sleep(0.3)
+        print("[info] Posted to X/Twitter")
+        return root_id
+    except tweepy.TweepyException as e:
+        print(f"[twitter] post failed: {e}")
+        return None
 
 # -------------------- Main --------------------
 
@@ -290,6 +353,8 @@ if __name__ == "__main__":
         msg_single = format_post(prices, changes, as_of, multiline=False)
         msg = assemble_post(prices, changes, as_of, prefix=PREFIX)
         post_bsky(msg, BLSKY_HANDLE, BLSKY_APP_PW, dry_run=DRY_RUN)
+        # Mirror to X/Twitter
+        post_twitter(msg, dry_run=DRY_RUN)
     except Exception as e:
         print(f"[error] {e}")
         # raise  # uncomment to fail CI on error
