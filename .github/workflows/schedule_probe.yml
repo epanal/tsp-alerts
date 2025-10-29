@@ -1,8 +1,10 @@
 name: Schedule Probe
 on:
   schedule:
-    - cron: "*/2 * * * *"  # every 2 minutes, UTC
-  ping:
+    - cron: "*/2 * * * *"
+
+jobs:
+  probe:                     # <-- a job name
     runs-on: ubuntu-latest
     steps:
       - run: |
