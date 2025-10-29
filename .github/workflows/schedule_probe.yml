@@ -1,8 +1,8 @@
 name: Schedule Probe
 on:
   workflow_dispatch: {}   # allows “Run workflow” button
-    schedule:
-      - cron: "*/2 * * * *"
+  schedule:
+    - cron: "*/2 * * * *"
 
 jobs:
   probe:                     # <-- a job name
