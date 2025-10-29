@@ -1,7 +1,7 @@
 name: Schedule Probe
 on:
   schedule:
-    - cron: "*/2 3 * * 2-6"   # every 2 minutes during the 03:00 UTC hour (≈ 8–9 PM PT Tue)
+    - cron: "*/3 4 * * 2-6"  # every 3 minutes during the 03:00 UTC hour (~8–9 PM PT, Tue–Sat)
 jobs:
   ping:
     runs-on: ubuntu-latest
