@@ -4,7 +4,7 @@ on:
   schedule:
     # Run ~9:05 PM ET Tue–Sat (covers Mon–Fri trading days).
     # GitHub cron uses UTC; 01:05 UTC ≈ 9:05 PM ET (during DST it’s 8:05 PM ET).
-    - cron: "45 1 * * 2-6"
+    - cron: "12 2 * * 2-6"
   workflow_dispatch:
     inputs:
       dry_run:
