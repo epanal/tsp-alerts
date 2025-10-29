@@ -1,0 +1,12 @@
+name: Schedule Probe
+on:
+  schedule:
+    - cron: "*/3 2 * * 2-6"   # every 3 minutes during the 2 AM UTC hour (~7 PM PT)
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "UTC now:" && date -u
+          echo "Branch: $GITHUB_REF"
+          echo "SHA:    $GITHUB_SHA"
