@@ -2,8 +2,7 @@ name: TSP Alerts Daily
 
 on:
   schedule:
-    - cron: '12 4 * * 2-6'  # 03:12 UTC == 8:12 PM PT (DST) tonight
-    - cron: '20 4 * * 2-6'  # backup at 03:20 UTC == 8:20 PM PT
+    - cron: '30 1 * * 2-6'  
   workflow_dispatch:
     inputs:
       dry_run:
