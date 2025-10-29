@@ -2,10 +2,8 @@ name: TSP Alerts Daily
 
 on:
   schedule:
-    # Run ~9:05 PM ET Tue–Sat (covers Mon–Fri trading days).
-    # GitHub cron uses UTC; 01:05 UTC ≈ 9:05 PM ET (during DST it’s 8:05 PM ET).
-    - cron: "10 3 * * 2-6"  # 8:10 PM PT (Tue–Sat UTC covers Mon–Fri local)
-    - cron: "18 3 * * 2-6"  # 8:18 PM PT backup
+    - cron: "12 3 * * 2-6"  # 03:12 UTC == 8:12 PM PT (DST) tonight
+    - cron: "20 3 * * 2-6"  # backup at 03:20 UTC == 8:20 PM PT
   workflow_dispatch:
     inputs:
       dry_run:
