@@ -1,5 +1,6 @@
+#!/usr/bin/env python3
 """
-TSP Alerts — Daily fund prices + % change posted to Bluesky.
+TSP Alerts — Daily fund prices + % change posted to Bluesky (and optional X/Twitter).
 Data source: Official TSP CSV (tsp.gov) over a rolling window (default 30 days).
 
 Setup:
@@ -9,7 +10,8 @@ Run:
   python tsp_bsky_daily.py   # DRY_RUN=true by default (set in .env)
 """
 
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
 import io
 import os
 import time
@@ -22,24 +24,13 @@ from dotenv import load_dotenv
 from atproto import Client, models
 import tweepy
 
-# -------------------- Weekend guard --------------------
-# Skip Sat(5)/Sun(6). Keep this after datetime imports.
-#if date.today().weekday() in (5, 6):
-#    print("[info] Weekend: skipping post.")
-#    raise SystemExit(0)
-
-# -------------------- Config helpers --------------------
+# -------------------- Config --------------------
 
 DEFAULT_FUNDS = ["G Fund", "F Fund", "C Fund", "S Fund", "I Fund"]
+CORE = {"G Fund", "F Fund", "C Fund", "S Fund", "I Fund"}
 
-def get_funds_from_env() -> List[str]:
-    raw = os.getenv("FUNDS", "").strip()
-    if not raw:
-        return DEFAULT_FUNDS
-    return [x.strip() for x in raw.split(",") if x.strip()]
-
-
-# -------------------- HTTP headers for tsp.gov --------------------
+MAX_CHARS = 300
+HASHTAGS = "#TSP #ThriftSavingsPlan"
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -53,8 +44,21 @@ BROWSER_HEADERS = {
     "Connection": "keep-alive",
 }
 
-def build_tsp_csv_url(window_days: int = 30, include_L: bool = True, include_inv: bool = True) -> str:
-    end = date.today()
+# -------------------- Helpers --------------------
+
+def get_funds_from_env() -> List[str]:
+    raw = os.getenv("FUNDS", "").strip()
+    if not raw:
+        return DEFAULT_FUNDS
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+def build_tsp_csv_url(
+    window_days: int = 30,
+    include_L: bool = True,
+    include_inv: bool = True,
+    end_date: date | None = None,
+) -> str:
+    end = end_date or date.today()
     start = end - timedelta(days=window_days)
     return (
         "https://www.tsp.gov/data/fund-price-history.csv"
@@ -62,10 +66,8 @@ def build_tsp_csv_url(window_days: int = 30, include_L: bool = True, include_inv
         f"&enddate={end:%Y-%m-%d}"
         f"&Lfunds={'1' if include_L else '0'}"
         f"&InvFunds={'1' if include_inv else '0'}"
-        "&download=1"  # attachment-type often behaves better
+        "&download=1"
     )
-
-# -------------------- Core logic --------------------
 
 def http_get_with_retry(url, session, tries=3, backoff=2.0):
     last_err = None
@@ -76,12 +78,11 @@ def http_get_with_retry(url, session, tries=3, backoff=2.0):
             return r
         except Exception as e:
             last_err = e
-            time.sleep(backoff * (i+1))
+            time.sleep(backoff * (i + 1))
     raise last_err
 
-CORE = {"G Fund","F Fund","C Fund","S Fund","I Fund"}
 def top_mover_label(changes: dict) -> str:
-    pool = {k:v for k,v in changes.items() if k in CORE} or changes
+    pool = {k: v for k, v in changes.items() if k in CORE} or changes
     if not pool:
         return ""
     k = max(pool, key=lambda f: abs(pool[f]))
@@ -89,9 +90,12 @@ def top_mover_label(changes: dict) -> str:
     sign = "+" if v >= 0 else ""
     return f" — Top: {k.split()[0]} {sign}{v:.2f}%"
 
+# -------------------- Fetch & Compute --------------------
+
 def fetch_prices_and_changes_from_csv_dynamic(
     funds: List[str],
-    window_days: int = 30
+    window_days: int = 30,
+    end_date: date | None = None,
 ) -> Tuple[Dict[str, float], Dict[str, float], date]:
     """
     Pull official TSP CSV for the last `window_days`, compute:
@@ -99,7 +103,12 @@ def fetch_prices_and_changes_from_csv_dynamic(
       - changes: % change vs previous trading day per fund
     Returns (prices_dict, changes_dict, as_of_date).
     """
-    url = build_tsp_csv_url(window_days=window_days, include_L=True, include_inv=True)
+    url = build_tsp_csv_url(
+        window_days=window_days,
+        include_L=True,
+        include_inv=True,
+        end_date=end_date,
+    )
 
     with requests.Session() as s:
         s.headers.update(BROWSER_HEADERS)
@@ -109,8 +118,11 @@ def fetch_prices_and_changes_from_csv_dynamic(
         raw = r.content
         head = raw[:200].lstrip().lower()
         if head.startswith(b"<html") or b"<html" in head:
-            # try toggling the download flag (some deployments differ)
-            alt = url.replace("&download=1", "&download=0") if "&download=1" in url else url.replace("&download=0", "&download=1")
+            alt = (
+                url.replace("&download=1", "&download=0")
+                if "&download=1" in url
+                else url.replace("&download=0", "&download=1")
+            )
             r = http_get_with_retry(alt, s)
             raw = r.content
             head = raw[:200].lstrip().lower()
@@ -123,24 +135,21 @@ def fetch_prices_and_changes_from_csv_dynamic(
             raise RuntimeError(f"Unexpected CSV columns: {list(df.columns)[:8]}")
 
     if df.empty:
-        return {}, {}, date.today()
+        return {}, {}, end_date or date.today()
 
     # Normalize
     df.columns = [c.strip() for c in df.columns]
-    if "Date" not in df.columns:
-        raise RuntimeError(f"Unexpected CSV columns: {list(df.columns)}")
-
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     for f in funds:
         if f in df.columns:
             df[f] = pd.to_numeric(df[f], errors="coerce")
 
-    # Keep only rows with at least one price present
+    # Keep only rows with at least one price present among requested funds
     present_cols = [f for f in funds if f in df.columns]
     df = df.dropna(subset=present_cols, how="all").sort_values("Date")
 
     if len(df) == 0:
-        return {}, {}, date.today()
+        return {}, {}, end_date or date.today()
 
     last_row = df.iloc[-1]
     as_of = last_row["Date"]
@@ -163,11 +172,13 @@ def fetch_prices_and_changes_from_csv_dynamic(
 
     return prices, changes, as_of
 
+# -------------------- Formatting --------------------
+
 def format_post(prices, changes, as_of, prefix="TSP Returns", multiline=False):
     if not prices:
         return f"📊 {prefix} — no new prices yet (weekend/holiday or upstream delay)."
 
-    order = ["G Fund","F Fund","C Fund","S Fund","I Fund"]
+    order = ["G Fund", "F Fund", "C Fund", "S Fund", "I Fund"]
     lines = []
     for f in order:
         if f in prices:
@@ -185,9 +196,6 @@ def format_post(prices, changes, as_of, prefix="TSP Returns", multiline=False):
     else:
         body = " | ".join(lines)
         return f"📊 {prefix} {as_of.isoformat()} — {body}{top}"
-    
-MAX_CHARS = 300
-HASHTAGS = "#TSP #ThriftSavingsPlan"
 
 def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
     # Build all variants
@@ -207,7 +215,6 @@ def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
         (single_top + f"\n\n{HASHTAGS}"),
         (multi_no_top + f"\n\n{HASHTAGS}"),
         (single_no_top + f"\n\n{HASHTAGS}"),
-
         multi_top, single_top, multi_no_top, single_no_top
     ]
 
@@ -215,10 +222,11 @@ def assemble_post(prices, changes, as_of, prefix="TSP Returns"):
         if len(msg) <= MAX_CHARS:
             return msg
 
-    # As a final fallback, hard trim 
-    return candidates[-1][:MAX_CHARS-1] + "…"
+    # As a final fallback, hard trim
+    return candidates[-1][:MAX_CHARS - 1] + "…"
 
 # -------------------- Bluesky --------------------
+
 HASHTAG_RE = re.compile(r'(?<!\w)#([A-Za-z0-9_]+)')
 
 def build_hashtag_facets(text: str):
@@ -228,14 +236,11 @@ def build_hashtag_facets(text: str):
     """
     facets = []
     for m in HASHTAG_RE.finditer(text):
-        tag = m.group(1)
-        # byte offsets (not codepoints!)
         byte_start = len(text[:m.start()].encode('utf-8'))
         byte_end   = byte_start + len(m.group(0).encode('utf-8'))
-
         facets.append(
             models.AppBskyRichtextFacet.Main(
-                features=[models.AppBskyRichtextFacet.Tag(tag=tag)],
+                features=[models.AppBskyRichtextFacet.Tag(tag=m.group(1))],
                 index=models.AppBskyRichtextFacet.ByteSlice(
                     byte_start=byte_start,
                     byte_end=byte_end,
@@ -246,22 +251,22 @@ def build_hashtag_facets(text: str):
 
 def post_bsky(text: str, handle: str, app_pw: str, dry_run: bool = True):
     if dry_run:
-        print("[dry-run]", text); return
+        print("[dry-run][bsky]", text)
+        return
     try:
         client = Client()
         client.login(handle, app_pw)
-
         facets = build_hashtag_facets(text)
         if facets:
             client.send_post(text=text, facets=facets)
         else:
             client.send_post(text=text)
-
         print("[info] Posted to Bluesky with facets:", bool(facets))
     except Exception as e:
         raise SystemExit(f"Bluesky post failed: {e}")
 
 # -------------------- X/Twitter --------------------
+
 def _init_twitter_client():
     k  = os.getenv("TWITTER_API_KEY")
     ks = os.getenv("TWITTER_API_SECRET")
@@ -316,7 +321,7 @@ def post_twitter(text: str, dry_run: bool = True):
                 resp = client.create_tweet(text=chunk)
                 root_id = resp.data.get("id")
             else:
-                resp = client.create_tweet(text=chunk, in_reply_to_tweet_id=root_id)
+                client.create_tweet(text=chunk, in_reply_to_tweet_id=root_id)
             time.sleep(0.3)
         print("[info] Posted to X/Twitter")
         return root_id
@@ -328,11 +333,16 @@ def post_twitter(text: str, dry_run: bool = True):
 
 if __name__ == "__main__":
     load_dotenv(override=False)
-    ALLOW_WEEKEND = os.getenv("ALLOW_WEEKEND", "false").lower() in {"1","true","yes","on"}
 
-    # Skip Sat/Sun unless explicitly allowed
-    if (date.today().weekday() in (5, 6)) and not ALLOW_WEEKEND:
-        print("[info] Weekend: skipping post.")
+    # Pacific time anchor for weekend logic and CSV window end date
+    tz_la = ZoneInfo("America/Los_Angeles")
+    now_la = datetime.now(tz_la)
+
+    ALLOW_WEEKEND = os.getenv("ALLOW_WEEKEND", "false").lower() in {"1", "true", "yes", "on"}
+
+    # Skip Sat/Sun by *Pacific* weekday unless explicitly allowed
+    if (now_la.weekday() in (5, 6)) and not ALLOW_WEEKEND:
+        print("[info] Weekend (America/Los_Angeles): skipping post.")
         raise SystemExit(0)
 
     FUNDS = get_funds_from_env()
@@ -340,21 +350,28 @@ if __name__ == "__main__":
     PREFIX = os.getenv("POST_PREFIX", "TSP Returns")
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
 
-    BLSKY_HANDLE = os.getenv("BLSKY_HANDLE", "").strip()
-    BLSKY_APP_PW = os.getenv("BLSKY_APP_PW", "").strip()
+    # Bluesky creds: accept either BLSKY_* or BSKY_* to avoid typos/drift
+    BLSKY_HANDLE = (os.getenv("BLSKY_HANDLE") or os.getenv("BSKY_HANDLE") or "").strip()
+    BLSKY_APP_PW = (os.getenv("BLSKY_APP_PW") or os.getenv("BSKY_APP_PASSWORD") or "").strip()
 
     if not BLSKY_HANDLE or not BLSKY_APP_PW:
         if not DRY_RUN:
-            raise SystemExit("Set BLSKY_HANDLE and BLSKY_APP_PW in .env or run with DRY_RUN=true")
+            raise SystemExit("Set BLSKY_HANDLE/BLSKY_APP_PW (or BSKY_HANDLE/BSKY_APP_PASSWORD) or run with DRY_RUN=true")
 
     try:
-        prices, changes, as_of = fetch_prices_and_changes_from_csv_dynamic(FUNDS, window_days=WINDOW_DAYS)
-        msg_multi  = format_post(prices, changes, as_of, multiline=True)
-        msg_single = format_post(prices, changes, as_of, multiline=False)
+        prices, changes, as_of = fetch_prices_and_changes_from_csv_dynamic(
+            FUNDS,
+            window_days=WINDOW_DAYS,
+            end_date=now_la.date(),  # align CSV window to Pacific date
+        )
         msg = assemble_post(prices, changes, as_of, prefix=PREFIX)
+
+        # Post to Bluesky
         post_bsky(msg, BLSKY_HANDLE, BLSKY_APP_PW, dry_run=DRY_RUN)
-        # Mirror to X/Twitter
+
+        # Mirror to X/Twitter (only if creds exist)
         post_twitter(msg, dry_run=DRY_RUN)
+
     except Exception as e:
         print(f"[error] {e}")
         # raise  # uncomment to fail CI on error
